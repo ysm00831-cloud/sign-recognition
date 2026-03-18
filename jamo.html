@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>자모 모드</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0f0f1a;color:#fff;font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;
+       display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:1rem}
+  header{width:100%;max-width:700px;display:flex;align-items:center;gap:1rem;margin-bottom:1rem}
+  header a{color:#aaa;text-decoration:none;font-size:1.2rem}
+  header h1{font-size:1.3rem}
+  #video-wrap{position:relative;width:100%;max-width:700px;border-radius:16px;overflow:hidden;background:#000}
+  #video{width:100%;display:block;transform:scaleX(-1)}
+  #canvas{position:absolute;top:0;left:0;width:100%;height:100%;transform:scaleX(-1)}
+  #live-label{position:absolute;top:12px;left:50%;transform:translateX(-50%);
+    background:rgba(0,0,0,.6);padding:4px 16px;border-radius:20px;font-size:1rem;
+    color:#7effa0;white-space:nowrap}
+  #output-wrap{width:100%;max-width:700px;margin-top:1rem;background:#1a1a2e;
+    border-radius:12px;padding:1rem;min-height:80px}
+  #output-wrap label{color:#aaa;font-size:.8rem;margin-bottom:.4rem;display:block}
+  #output{font-size:1.8rem;word-break:break-all;line-height:1.5;min-height:2.5rem;white-space:pre-wrap}
+  .controls{width:100%;max-width:700px;display:flex;gap:.5rem;margin-top:.8rem;flex-wrap:wrap}
+  button{flex:1;min-width:80px;padding:.6rem;border:none;border-radius:10px;
+         font-size:.9rem;cursor:pointer;font-family:inherit}
+  .btn-clear{background:#e74c3c;color:#fff}
+  .btn-space{background:#3498db;color:#fff}
+  .btn-delete{background:#e67e22;color:#fff}
+  #status{margin-top:.5rem;font-size:.75rem;color:#666}
+  #loading{position:fixed;inset:0;background:#0f0f1a;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:1rem;z-index:100}
+  .spinner{width:48px;height:48px;border:4px solid #333;border-top-color:#667eea;
+    border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p>모델 로딩 중...</p>
+</div>
+
+<header>
+  <a href="index.html">← 홈</a>
+  <h1>🔤 자모 모드</h1>
+</header>
+
+<div id="video-wrap">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="live-label">손을 카메라에 보여주세요</div>
+</div>
+
+<div id="output-wrap">
+  <label>인식된 텍스트</label>
+  <div id="output"></div>
+</div>
+
+<div class="controls">
+  <button class="btn-space"  onclick="addSpace()">띄어쓰기</button>
+  <button class="btn-delete" onclick="deleteLast()">← 삭제</button>
+  <button class="btn-clear"  onclick="clearAll()">전체 삭제</button>
+</div>
+
+<div id="status">모델 로딩 중...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+<script>
+const video    = document.getElementById('video');
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const liveEl   = document.getElementById('live-label');
+const outputEl = document.getElementById('output');
+const statusEl = document.getElementById('status');
+const loadingEl= document.getElementById('loading');
+
+// --- 자모 조합 ---
+const CHO  = Array.from("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ");
+const JUNG = ["ㅏ","ㅐ","ㅑ","ㅒ","ㅓ","ㅔ","ㅕ","ㅖ","ㅗ","ㅘ","ㅙ","ㅚ","ㅛ","ㅜ","ㅝ","ㅞ","ㅟ","ㅠ","ㅡ","ㅢ","ㅣ"];
+const JONG = ["","ㄱ","ㄲ","ㄳ","ㄴ","ㄵ","ㄶ","ㄷ","ㄹ","ㄺ","ㄻ","ㄼ","ㄽ","ㄾ","ㄿ","ㅀ","ㅁ","ㅂ","ㅄ","ㅅ","ㅆ","ㅇ","ㅈ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"];
+const CHO_I ={},JUNG_I={},JONG_I={};
+CHO.forEach((c,i)=>CHO_I[c]=i); JUNG.forEach((c,i)=>JUNG_I[c]=i); JONG.forEach((c,i)=>JONG_I[c]=i);
+
+function compose(stream){
+  let out="",i=0;
+  while(i<stream.length){
+    const ch=stream[i];
+    if(ch in CHO_I&&i+1<stream.length&&stream[i+1]in JUNG_I){
+      const c=CHO_I[ch],j=JUNG_I[stream[i+1]]; i+=2;
+      let k=0;
+      if(i<stream.length&&stream[i]in JONG_I){k=JONG_I[stream[i]];i++;}
+      out+=String.fromCharCode(0xAC00+(c*21+j)*28+k);
+    } else {
+      if(!(ch in CHO_I)&&!(ch in JUNG_I)&&!(ch in JONG_I)){i++;continue;}
+      out+=ch;i++;
+    }
+  }
+  return out;
+}
+
+let session=null, labels=[];
+const CONF_THRESH=0.20, DWELL_MS=600, COOL_MS=700;
+let dwellLabel=null,dwellStart=0,coolUntil=0;
+let jamoBuf=[],committed=[];
+
+function render(){ outputEl.textContent=committed.join('')+compose(jamoBuf); }
+function addSpace(){ committed.push(compose(jamoBuf));jamoBuf=[];committed.push(' ');render(); }
+function deleteLast(){ if(jamoBuf.length>0)jamoBuf.pop();else if(committed.length>0)committed.pop();render(); }
+function clearAll(){ jamoBuf=[];committed=[];render(); }
+
+async function init(){
+  // 라벨 로드
+  const res = await fetch('models/labels.json');
+  const data = await res.json();
+  labels = data.jamo;
+
+  // ONNX 모델 로드
+  session = await ort.InferenceSession.create('models/jamo.onnx');
+  loadingEl.style.display='none';
+  statusEl.textContent='준비 완료';
+}
+
+async function predict(raw_lm){
+  if(!session||raw_lm.length<21) return {label:'UNKNOWN',conf:0};
+  const idx=[0,4,8,12,16,20];
+  const pts=idx.map(i=>[raw_lm[i].x,raw_lm[i].y]);
+  const ax=pts[0][0],ay=pts[0][1];
+  const rel=pts.map(([x,y])=>[x-ax,y-ay]);
+  const scale=Math.sqrt(rel[1][0]**2+rel[1][1]**2)+1e-6;
+  const norm=rel.map(([x,y])=>[x/scale,y/scale]);
+  const flat=new Float32Array(norm.flat());
+  const tensor=new ort.Tensor('float32',flat,[1,12]);
+  const out=await session.run({input:tensor});
+  const logits=out.output.data;
+  const expV=Array.from(logits).map(v=>Math.exp(v));
+  const sumE=expV.reduce((a,b)=>a+b,0);
+  const prob=expV.map(v=>v/sumE);
+  const best=prob.indexOf(Math.max(...prob));
+  return {label:labels[best]||'UNKNOWN', conf:prob[best]};
+}
+
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+
+hands.onResults(async results=>{
+  canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if(results.multiHandLandmarks&&results.multiHandLandmarks.length>0){
+    const lm=results.multiHandLandmarks[0];
+    drawConnectors(ctx,lm,HAND_CONNECTIONS,{color:'#00ff88',lineWidth:2});
+    drawLandmarks(ctx,lm,{color:'#fff',lineWidth:1,radius:3});
+
+    const {label,conf}=await predict(lm);
+    if(label==='UNKNOWN'){liveEl.textContent='—';dwellLabel=null;return;}
+    liveEl.textContent=`${label}  (${(conf*100).toFixed(0)}%)`;
+
+    const now=Date.now();
+    if(label!==dwellLabel){dwellLabel=label;dwellStart=now;return;}
+    if(now-dwellStart>=DWELL_MS&&now>=coolUntil){
+      coolUntil=now+COOL_MS; dwellLabel=null;
+      if(label==='(띄어쓰기)'){committed.push(compose(jamoBuf));jamoBuf=[];committed.push(' ');}
+      else if(label==='(삭제)'){if(jamoBuf.length>0)jamoBuf.pop();else if(committed.length>0)committed.pop();}
+      else if(label==='(줄바꿈)'){committed.push(compose(jamoBuf));jamoBuf=[];committed.push('\n');}
+      else jamoBuf.push(label);
+      render();
+    }
+  } else {
+    liveEl.textContent='손을 카메라에 보여주세요';
+    dwellLabel=null;
+  }
+});
+
+const camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},width:640,height:480});
+
+init().then(()=>camera.start()).catch(e=>{
+  statusEl.textContent='오류: '+e.message;
+  loadingEl.innerHTML=`<p style="color:#e74c3c">오류: ${e.message}</p>`;
+});
+</script>
+</body>
+</html>
