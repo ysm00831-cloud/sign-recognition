@@ -3,7 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="screen-orientation" content="landscape">
 <title>자모 모드</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -11,13 +10,15 @@
        display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:1rem}
   header{width:100%;max-width:700px;display:flex;align-items:center;gap:1rem;margin-bottom:1rem}
   header a{color:#aaa;text-decoration:none;font-size:1.2rem}
-  header h1{font-size:1.3rem}
+  header h1{font-size:1.3rem;flex:1}
+  #res-select{background:#1a1a2e;color:#aaa;border:1px solid #333;border-radius:8px;
+    padding:4px 8px;font-size:.8rem;cursor:pointer}
   #video-wrap{position:relative;width:100%;max-width:700px;border-radius:16px;overflow:hidden;background:#000}
   #video{width:100%;display:block;transform:scaleX(-1)}
   #canvas{position:absolute;top:0;left:0;width:100%;height:100%;transform:scaleX(-1)}
   #live-label{position:absolute;top:12px;left:50%;transform:translateX(-50%);
     background:rgba(0,0,0,.6);padding:4px 16px;border-radius:20px;font-size:1rem;
-    color:#7effa0;white-space:nowrap}
+    color:#7effa0;white-space:nowrap;max-width:90%;text-align:center}
   #output-wrap{width:100%;max-width:700px;margin-top:1rem;background:#1a1a2e;
     border-radius:12px;padding:1rem;min-height:80px}
   #output-wrap label{color:#aaa;font-size:.8rem;margin-bottom:.4rem;display:block}
@@ -38,14 +39,16 @@
 </head>
 <body>
 
-<div id="loading">
-  <div class="spinner"></div>
-  <p>모델 로딩 중...</p>
-</div>
+<div id="loading"><div class="spinner"></div><p>모델 로딩 중...</p></div>
 
 <header>
   <a href="index.html">← 홈</a>
   <h1>🔤 자모 모드</h1>
+  <select id="res-select" onchange="changeResolution(this.value)">
+    <option value="480">480p (권장)</option>
+    <option value="720">720p (고화질)</option>
+    <option value="240">240p (저사양)</option>
+  </select>
 </header>
 
 <div id="video-wrap">
@@ -64,14 +67,12 @@
   <button class="btn-delete" onclick="deleteLast()">← 삭제</button>
   <button class="btn-clear"  onclick="clearAll()">전체 삭제</button>
 </div>
-
 <div id="status">모델 로딩 중...</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
-
 <script>
 const video    = document.getElementById('video');
 const canvas   = document.getElementById('canvas');
@@ -81,11 +82,16 @@ const outputEl = document.getElementById('output');
 const statusEl = document.getElementById('status');
 const loadingEl= document.getElementById('loading');
 
-// --- 자모 조합 ---
+// 해상도 프리셋
+const RES = { '240':[320,240], '480':[640,480], '720':[1280,720] };
+let curRes = '480';
+let camera = null;
+
+// 자모 조합
 const CHO  = Array.from("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ");
 const JUNG = ["ㅏ","ㅐ","ㅑ","ㅒ","ㅓ","ㅔ","ㅕ","ㅖ","ㅗ","ㅘ","ㅙ","ㅚ","ㅛ","ㅜ","ㅝ","ㅞ","ㅟ","ㅠ","ㅡ","ㅢ","ㅣ"];
 const JONG = ["","ㄱ","ㄲ","ㄳ","ㄴ","ㄵ","ㄶ","ㄷ","ㄹ","ㄺ","ㄻ","ㄼ","ㄽ","ㄾ","ㄿ","ㅀ","ㅁ","ㅂ","ㅄ","ㅅ","ㅆ","ㅇ","ㅈ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"];
-const CHO_I ={},JUNG_I={},JONG_I={};
+const CHO_I={},JUNG_I={},JONG_I={};
 CHO.forEach((c,i)=>CHO_I[c]=i); JUNG.forEach((c,i)=>JUNG_I[c]=i); JONG.forEach((c,i)=>JONG_I[c]=i);
 
 function compose(stream){
@@ -99,7 +105,7 @@ function compose(stream){
       out+=String.fromCharCode(0xAC00+(c*21+j)*28+k);
     } else {
       if(!(ch in CHO_I)&&!(ch in JUNG_I)&&!(ch in JONG_I)){i++;continue;}
-      out+=ch;i++;
+      out+=ch; i++;
     }
   }
   return out;
@@ -115,39 +121,9 @@ function addSpace(){ committed.push(compose(jamoBuf));jamoBuf=[];committed.push(
 function deleteLast(){ if(jamoBuf.length>0)jamoBuf.pop();else if(committed.length>0)committed.pop();render(); }
 function clearAll(){ jamoBuf=[];committed=[];render(); }
 
-async function init(){
-  // 라벨 로드
-  const res = await fetch('models/labels.json');
-  const data = await res.json();
-  labels = data.jamo;
-
-  // ONNX 모델 로드
-  session = await ort.InferenceSession.create('models/jamo.onnx');
-  loadingEl.style.display='none';
-  statusEl.textContent='준비 완료';
-}
-
-async function predict(raw_lm){
-  if(!session||raw_lm.length<21) return {label:'UNKNOWN',conf:0};
-  const idx=[0,4,8,12,16,20];
-  const pts=idx.map(i=>[raw_lm[i].x,raw_lm[i].y]);
-  const ax=pts[0][0],ay=pts[0][1];
-  const rel=pts.map(([x,y])=>[x-ax,y-ay]);
-  const scale=Math.sqrt(rel[1][0]**2+rel[1][1]**2)+1e-6;
-  const norm=rel.map(([x,y])=>[x/scale,y/scale]);
-  const flat=new Float32Array(norm.flat());
-  const tensor=new ort.Tensor('float32',flat,[1,12]);
-  const out=await session.run({input:tensor});
-  const logits=out.output.data;
-  const expV=Array.from(logits).map(v=>Math.exp(v));
-  const sumE=expV.reduce((a,b)=>a+b,0);
-  const prob=expV.map(v=>v/sumE);
-  const best=prob.indexOf(Math.max(...prob));
-  return {label:labels[best]||'UNKNOWN', conf:prob[best]};
-}
-
+// MediaPipe
 const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({maxNumHands:1,modelComplexity:0,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
 
 hands.onResults(async results=>{
   canvas.width=video.videoWidth; canvas.height=video.videoHeight;
@@ -178,11 +154,48 @@ hands.onResults(async results=>{
   }
 });
 
-const isMobile=/iPhone|iPad|Android/i.test(navigator.userAgent);
-const camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},
-  width:isMobile?320:640, height:isMobile?240:480});
+async function predict(raw_lm){
+  if(!session||raw_lm.length<21) return {label:'UNKNOWN',conf:0};
+  const idx=[0,4,8,12,16,20];
+  const pts=idx.map(i=>[raw_lm[i].x,raw_lm[i].y]);
+  const ax=pts[0][0],ay=pts[0][1];
+  const rel=pts.map(([x,y])=>[x-ax,y-ay]);
+  const scale=Math.sqrt(rel[1][0]**2+rel[1][1]**2)+1e-6;
+  const norm=rel.map(([x,y])=>[x/scale,y/scale]);
+  const flat=new Float32Array(norm.flat());
+  const tensor=new ort.Tensor('float32',flat,[1,12]);
+  const out=await session.run({input:tensor});
+  const logits=out.output.data;
+  const expV=Array.from(logits).map(v=>Math.exp(v));
+  const sumE=expV.reduce((a,b)=>a+b,0);
+  const prob=expV.map(v=>v/sumE);
+  const best=prob.indexOf(Math.max(...prob));
+  return {label:labels[best]||'UNKNOWN',conf:prob[best]};
+}
 
-init().then(()=>camera.start()).catch(e=>{
+function startCamera(res){
+  if(camera){ camera.stop(); camera=null; }
+  const [w,h]=RES[res]||[640,480];
+  camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},width:w,height:h});
+  camera.start();
+  statusEl.textContent=`카메라 ${w}x${h}`;
+}
+
+function changeResolution(val){
+  curRes=val;
+  startCamera(val);
+}
+
+async function init(){
+  const res=await fetch('models/labels.json');
+  const data=await res.json();
+  labels=data.jamo;
+  session=await ort.InferenceSession.create('models/jamo.onnx');
+  loadingEl.style.display='none';
+  startCamera(curRes);
+}
+
+init().catch(e=>{
   statusEl.textContent='오류: '+e.message;
   loadingEl.innerHTML=`<p style="color:#e74c3c">오류: ${e.message}</p>`;
 });
