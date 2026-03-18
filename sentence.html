@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="screen-orientation" content="landscape">
 <title>문장 모드</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -198,7 +199,9 @@ hands.onResults(results=>{
   }
 });
 
-const camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},width:640,height:480});
+const isMobile=/iPhone|iPad|Android/i.test(navigator.userAgent);
+const camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},
+  width:isMobile?320:640, height:isMobile?240:480});
 
 init().then(()=>camera.start()).catch(e=>{
   statusEl.textContent='오류: '+e.message;
