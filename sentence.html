@@ -165,7 +165,7 @@ async function runInference(){
 }
 
 const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
 
 hands.onResults(results=>{
   canvas.width=video.videoWidth; canvas.height=video.videoHeight;
