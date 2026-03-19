@@ -1,0 +1,35 @@
+{
+  "packageId": "com.signsense.app",
+  "host": "ysm00831-cloud.github.io",
+  "name": "수화 인식기",
+  "launcherName": "수화",
+  "display": "standalone",
+  "themeColor": "#667eea",
+  "navigationColor": "#0f0f1a",
+  "backgroundColor": "#0f0f1a",
+  "enableNotifications": false,
+  "startUrl": "/sign-recognition/",
+  "iconUrl": "https://ysm00831-cloud.github.io/sign-recognition/icons/icon-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "android"
+  },
+  "appVersionCode": 1,
+  "appVersion": "1.0.0",
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://ysm00831-cloud.github.io/sign-recognition/manifest.json",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://ysm00831-cloud.github.io/sign-recognition/",
+  "minSdkVersion": 19,
+  "orientation": "portrait",
+  "fingerprints": []
+}
