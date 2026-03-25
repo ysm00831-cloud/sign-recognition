@@ -84,18 +84,22 @@ def on_disconnect():
 def handle_seq_frame(data):
     """
     data = {
-        'landmarks':   [[{x,y,z}×21], ...]  # 감지된 각 손
-        'handedness':  ['Left', 'Right', ...]
+        'landmarks':       [[{x,y,z}×21], ...]  # 감지된 각 손
+        'handedness':      ['Left', 'Right', ...]
+        'pose_landmarks':  [{x,y,z}×33] or null
+        'face_landmarks':  [{x,y,z}×468] or null
     }
     """
     from flask import request
     if seq_model is None:
         return
 
-    raw_lm_list    = data.get('landmarks', [])
+    raw_lm_list     = data.get('landmarks', [])
     handedness_list = data.get('handedness', [])
+    pose_lm         = data.get('pose_landmarks', None)
+    face_lm         = data.get('face_landmarks', None)
 
-    feat = inference.extract_seq_feat(raw_lm_list, handedness_list)
+    feat = inference.extract_seq_feat(raw_lm_list, handedness_list, pose_lm, face_lm)
     if feat is not None:
         buf = seq_buffers.setdefault(request.sid, [])
         buf.append(feat)

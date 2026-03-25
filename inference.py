@@ -120,8 +120,12 @@ def extract_jamo_feat(raw_lm: list) -> Optional[np.ndarray]:
     pts /= scale
     return pts.flatten()  # (12,)
 
-def extract_seq_feat(raw_lm_list: list, handedness_list: list) -> Optional[np.ndarray]:
-    """문장용: 양손 21점 → 84차원"""
+POSE_IDX = [0, 11, 12, 13, 14, 15, 16, 23, 24]  # 코, 양어깨, 양팔꿈치, 양손목, 양엉덩이
+FACE_IDX = [1, 133, 362, 61, 291]               # 코끝, 양눈안쪽, 양입꼬리
+
+def extract_seq_feat(raw_lm_list: list, handedness_list: list,
+                     pose_lm: list = None, face_lm: list = None) -> Optional[np.ndarray]:
+    """문장용: 양손(84) + 포즈 상체(18) + 얼굴 핵심(10) → 112차원"""
     if not raw_lm_list:
         return None
 
@@ -138,14 +142,19 @@ def extract_seq_feat(raw_lm_list: list, handedness_list: list) -> Optional[np.nd
             elif right_lm is None:
                 right_lm = lm
 
-    anchor_src = left_lm or right_lm
-    if anchor_src is None:
-        return None
-
-    anchor = np.array([anchor_src[0]['x'], anchor_src[0]['y']], dtype=np.float32)
-    scale = np.linalg.norm(
-        np.array([anchor_src[8]['x'], anchor_src[8]['y']], dtype=np.float32) - anchor
-    ) + 1e-6
+    # 정규화 기준: 포즈 어깨 중점 + 어깨 너비, 없으면 손목 기준
+    if pose_lm and len(pose_lm) > 12:
+        ls = np.array([pose_lm[11]['x'], pose_lm[11]['y']], dtype=np.float32)
+        rs = np.array([pose_lm[12]['x'], pose_lm[12]['y']], dtype=np.float32)
+        anchor = (ls + rs) * 0.5
+        scale  = float(np.linalg.norm(ls - rs)) + 1e-6
+    else:
+        src = left_lm or right_lm
+        if src is None:
+            return None
+        anchor = np.array([src[0]['x'], src[0]['y']], dtype=np.float32)
+        scale  = float(np.linalg.norm(
+            np.array([src[8]['x'], src[8]['y']], dtype=np.float32) - anchor)) + 1e-6
 
     def hand_feat(lm):
         if lm is None:
@@ -153,9 +162,26 @@ def extract_seq_feat(raw_lm_list: list, handedness_list: list) -> Optional[np.nd
         pts = np.array([[p['x'], p['y']] for p in lm], dtype=np.float32)
         pts -= anchor
         pts /= scale
-        return pts.flatten()
+        return pts.flatten()  # (42,)
 
-    return np.concatenate([hand_feat(left_lm), hand_feat(right_lm)])  # (84,)
+    def pose_feat():
+        if not pose_lm or len(pose_lm) <= max(POSE_IDX):
+            return np.zeros(18, dtype=np.float32)
+        pts = np.array([[pose_lm[i]['x'], pose_lm[i]['y']] for i in POSE_IDX], dtype=np.float32)
+        pts -= anchor
+        pts /= scale
+        return pts.flatten()  # (18,)
+
+    def face_feat():
+        if not face_lm or len(face_lm) <= max(FACE_IDX):
+            return np.zeros(10, dtype=np.float32)
+        pts = np.array([[face_lm[i]['x'], face_lm[i]['y']] for i in FACE_IDX], dtype=np.float32)
+        pts -= anchor
+        pts /= scale
+        return pts.flatten()  # (10,)
+
+    return np.concatenate([hand_feat(left_lm), hand_feat(right_lm),
+                           pose_feat(), face_feat()])  # (112,)
 
 # =============================================================================
 # 추론

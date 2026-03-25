@@ -94,7 +94,8 @@ def export_seq():
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    dummy    = torch.zeros(1, seq_len, 84)
+    input_size = ckpt.get("input_size", 112)
+    dummy    = torch.zeros(1, seq_len, input_size)
     out_path = os.path.join(WEB_DIR, "seq.onnx")
     torch.onnx.export(model, dummy, out_path,
                       input_names=["input"], output_names=["output"],
