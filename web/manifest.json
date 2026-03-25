@@ -1,0 +1,26 @@
+{
+  "name": "수화 인식기",
+  "short_name": "수화",
+  "description": "AI 기반 한국 수화 인식 앱",
+  "start_url": "/sign-recognition/",
+  "scope": "/sign-recognition/",
+  "display": "standalone",
+  "background_color": "#0f0f1a",
+  "theme_color": "#667eea",
+  "orientation": "portrait",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
