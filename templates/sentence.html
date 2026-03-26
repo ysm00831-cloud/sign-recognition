@@ -95,10 +95,11 @@
 </div>
 <div id="status">서버 연결 중...</div>
 
-<!-- MediaPipe Holistic CDN -->
+<!-- MediaPipe CDN -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 <!-- Socket.IO -->
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
@@ -120,31 +121,46 @@ const socket = io();
 socket.on('connect',    () => statusEl.textContent = '✅ 서버 연결됨');
 socket.on('disconnect', () => statusEl.textContent = '❌ 서버 연결 끊김');
 
-let committed=[], frameCount=0;
-const MAX_FRAMES=60;
-let handVisible=false, handGoneTimer=null;
-const HAND_GONE_MS=400;
+let committed = [], frameCount = 0;
+const MAX_FRAMES = 60;
+let handVisible = false, handGoneTimer = null;
+const HAND_GONE_MS = 400;
 
-function render(){ outputEl.textContent=committed.join(' '); }
+// FaceMesh 최신 결과 저장
+let latestFaceLm = null;
+
+function render(){ outputEl.textContent = committed.join(' '); }
 function deleteLast(){ committed.pop(); render(); }
-function clearAll(){ committed=[]; render(); }
+function clearAll(){ committed = []; render(); }
 
 socket.on('seq_result', (data) => {
   const {label, conf} = data;
-  frameCount=0; frameBar.style.width='0%';
-  if(label&&label!=='UNKNOWN'){
-    liveEl.textContent=`✅ ${label}  (${(conf*100).toFixed(0)}%)`;
+  frameCount = 0; frameBar.style.width = '0%';
+  if(label && label !== 'UNKNOWN'){
+    liveEl.textContent = `✅ ${label}  (${(conf * 100).toFixed(0)}%)`;
     committed.push(label); render();
   } else {
-    liveEl.textContent='인식 실패 (신뢰도 낮음)';
+    liveEl.textContent = '인식 실패 (신뢰도 낮음)';
   }
 });
 
 function endSequence(){
-  if(handVisible){ handVisible=false; socket.emit('seq_end'); }
+  if(handVisible){ handVisible = false; socket.emit('seq_end'); }
 }
 
-// MediaPipe Holistic
+// MediaPipe FaceMesh — 얼굴 랜드마크를 안정적으로 수집
+const faceMesh = new FaceMesh({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: false,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+faceMesh.onResults(results => {
+  latestFaceLm = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || null;
+});
+
+// MediaPipe Holistic — 손 + 포즈
 const holistic = new Holistic({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
 holistic.setOptions({
   modelComplexity: 1,
@@ -154,75 +170,90 @@ holistic.setOptions({
 });
 
 holistic.onResults(results => {
-  canvas.width=video.videoWidth; canvas.height=video.videoHeight;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const hasHand = results.leftHandLandmarks || results.rightHandLandmarks;
 
   if(hasHand){
-    if(handGoneTimer){clearTimeout(handGoneTimer);handGoneTimer=null;}
-    handVisible=true;
+    if(handGoneTimer){ clearTimeout(handGoneTimer); handGoneTimer = null; }
+    handVisible = true;
 
-    // 손 그리기
     if(results.leftHandLandmarks){
-      drawConnectors(ctx,results.leftHandLandmarks,HAND_CONNECTIONS,{color:'#38ef7d',lineWidth:2});
-      drawLandmarks(ctx,results.leftHandLandmarks,{color:'#fff',lineWidth:1,radius:3});
+      drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, {color:'#38ef7d', lineWidth:2});
+      drawLandmarks(ctx, results.leftHandLandmarks, {color:'#fff', lineWidth:1, radius:3});
     }
     if(results.rightHandLandmarks){
-      drawConnectors(ctx,results.rightHandLandmarks,HAND_CONNECTIONS,{color:'#38ef7d',lineWidth:2});
-      drawLandmarks(ctx,results.rightHandLandmarks,{color:'#fff',lineWidth:1,radius:3});
+      drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, {color:'#38ef7d', lineWidth:2});
+      drawLandmarks(ctx, results.rightHandLandmarks, {color:'#fff', lineWidth:1, radius:3});
     }
-    // 포즈 상체 그리기
     if(results.poseLandmarks){
-      drawConnectors(ctx,results.poseLandmarks,POSE_CONNECTIONS,{color:'#44448888',lineWidth:1});
+      drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, {color:'#44448888', lineWidth:1});
     }
 
     // 손 랜드마크 수집
-    const lmList=[], hList=[];
+    const lmList = [], hList = [];
     if(results.leftHandLandmarks){
-      lmList.push(results.leftHandLandmarks.map(p=>({x:p.x,y:p.y,z:p.z})));
+      lmList.push(results.leftHandLandmarks.map(p => ({x:p.x, y:p.y, z:p.z})));
       hList.push('Left');
     }
     if(results.rightHandLandmarks){
-      lmList.push(results.rightHandLandmarks.map(p=>({x:p.x,y:p.y,z:p.z})));
+      lmList.push(results.rightHandLandmarks.map(p => ({x:p.x, y:p.y, z:p.z})));
       hList.push('Right');
     }
 
-    // 포즈/얼굴 랜드마크 수집
+    // 포즈 랜드마크
     const poseLm = results.poseLandmarks
-      ? results.poseLandmarks.map(p=>({x:p.x,y:p.y,z:p.z})) : null;
-    const faceLm = results.faceLandmarks
-      ? results.faceLandmarks.map(p=>({x:p.x,y:p.y,z:p.z})) : null;
+      ? results.poseLandmarks.map(p => ({x:p.x, y:p.y, z:p.z})) : null;
 
-    socket.emit('seq_frame',{landmarks:lmList, handedness:hList,
-                             pose_landmarks:poseLm, face_landmarks:faceLm});
+    // 얼굴 랜드마크: FaceMesh 우선, 없으면 Holistic faceLandmarks 사용
+    const faceLmSrc = latestFaceLm || results.faceLandmarks || null;
+    const faceLm = faceLmSrc
+      ? faceLmSrc.map(p => ({x:p.x, y:p.y, z:p.z})) : null;
 
-    frameCount=Math.min(frameCount+1,MAX_FRAMES);
-    frameBar.style.width=(frameCount/MAX_FRAMES*100)+'%';
-    liveEl.textContent=`🔴 수집 중 (${frameCount}프레임)`;
+    socket.emit('seq_frame', {
+      landmarks:       lmList,
+      handedness:      hList,
+      pose_landmarks:  poseLm,
+      face_landmarks:  faceLm
+    });
+
+    frameCount = Math.min(frameCount + 1, MAX_FRAMES);
+    frameBar.style.width = (frameCount / MAX_FRAMES * 100) + '%';
+    liveEl.textContent = `🔴 수집 중 (${frameCount}프레임)`;
 
   } else {
-    if(handVisible&&!handGoneTimer){
-      handGoneTimer=setTimeout(()=>{
-        endSequence(); handGoneTimer=null;
-        liveEl.textContent='손을 카메라에 보여주세요';
-        frameBar.style.width='0%';
-      },HAND_GONE_MS);
+    if(handVisible && !handGoneTimer){
+      handGoneTimer = setTimeout(() => {
+        endSequence(); handGoneTimer = null;
+        liveEl.textContent = '손을 카메라에 보여주세요';
+        frameBar.style.width = '0%';
+        frameCount = 0;
+      }, HAND_GONE_MS);
     }
   }
 });
 
 function startCamera(res){
-  if(camera){ camera.stop(); camera=null; }
-  const [w,h]=RES[res]||[640,480];
-  camera=new Camera(video,{onFrame:async()=>{await holistic.send({image:video});},width:w,height:h});
-  camera.start().then(()=>{
-    loadingEl.style.display='none';
-    statusEl.textContent=`카메라 ${w}x${h}`;
+  if(camera){ camera.stop(); camera = null; }
+  const [w, h] = RES[res] || [640, 480];
+  camera = new Camera(video, {
+    onFrame: async () => {
+      await Promise.all([
+        holistic.send({image: video}),
+        faceMesh.send({image: video})
+      ]);
+    },
+    width: w, height: h
+  });
+  camera.start().then(() => {
+    loadingEl.style.display = 'none';
+    statusEl.textContent = `카메라 ${w}x${h}`;
   });
 }
 
-function changeResolution(val){ curRes=val; startCamera(val); }
+function changeResolution(val){ curRes = val; startCamera(val); }
 
 startCamera(curRes);
 </script>

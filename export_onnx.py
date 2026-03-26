@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
-WEB_DIR   = os.path.join(BASE_DIR, "web", "models")
+WEB_DIR   = MODEL_DIR  # ONNX 파일을 models/ 에 바로 저장
 os.makedirs(WEB_DIR, exist_ok=True)
 
 # =============================================================================

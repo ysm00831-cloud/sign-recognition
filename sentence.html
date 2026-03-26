@@ -91,6 +91,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 
 <script>
@@ -108,159 +109,188 @@ const RES = { '240':[320,240], '480':[640,480], '720':[1280,720] };
 let curRes = '480';
 let camera = null;
 
-// 포즈/얼굴 특징 인덱스 (sign_lstm.py 와 동일)
+// 특징 인덱스 (inference.py 와 동일)
 const POSE_IDX = [0, 11, 12, 13, 14, 15, 16, 23, 24];
 const FACE_IDX = [1, 133, 362, 61, 291];
 const INPUT_SIZE = 112; // 손(84) + 포즈(18) + 얼굴(10)
 
-let session=null, labels=[], seqLen=20;
-let committed=[], seqBuf=[], handVisible=false, handGoneTimer=null;
-const CONF_THRESH=0.50, HAND_GONE_MS=400, MAX_FRAMES=60;
+let session = null, labels = [], seqLen = 20;
+let committed = [], seqBuf = [], handVisible = false, handGoneTimer = null;
+const CONF_THRESH = 0.50, HAND_GONE_MS = 400, MAX_FRAMES = 60;
 
-function render(){ outputEl.textContent=committed.join(' '); }
+// FaceMesh 최신 결과 저장
+let latestFaceLm = null;
+
+function render(){ outputEl.textContent = committed.join(' '); }
 function deleteLast(){ committed.pop(); render(); }
-function clearAll(){ committed=[]; render(); }
+function clearAll(){ committed = []; render(); }
 
 // 112차원 특징 추출
 function extractFeat(results){
   const leftLm  = results.leftHandLandmarks;
   const rightLm = results.rightHandLandmarks;
   const poseLm  = results.poseLandmarks;
-  const faceLm  = results.faceLandmarks;
+  // FaceMesh 결과 우선, 없으면 Holistic faceLandmarks 사용
+  const faceLm  = latestFaceLm || results.faceLandmarks || null;
 
   if(!leftLm && !rightLm) return null;
 
   // 정규화 기준: 포즈 어깨 중점+너비, 없으면 손목 기준
   let anchor, scale;
   if(poseLm){
-    const ls=poseLm[11], rs=poseLm[12];
-    anchor=[(ls.x+rs.x)/2, (ls.y+rs.y)/2];
-    scale=Math.sqrt((ls.x-rs.x)**2+(ls.y-rs.y)**2)+1e-6;
+    const ls = poseLm[11], rs = poseLm[12];
+    anchor = [(ls.x + rs.x) / 2, (ls.y + rs.y) / 2];
+    scale  = Math.sqrt((ls.x - rs.x) ** 2 + (ls.y - rs.y) ** 2) + 1e-6;
   } else {
-    const src=leftLm||rightLm;
-    anchor=[src[0].x, src[0].y];
-    scale=Math.sqrt((src[8].x-anchor[0])**2+(src[8].y-anchor[1])**2)+1e-6;
+    const src = leftLm || rightLm;
+    anchor = [src[0].x, src[0].y];
+    scale  = Math.sqrt((src[8].x - anchor[0]) ** 2 + (src[8].y - anchor[1]) ** 2) + 1e-6;
   }
 
-  // 손 특징 (42 × 2 = 84)
-  const handFeat=lm=>{
+  // 손 특징 (42점 × 2 = 84)
+  const handFeat = lm => {
     if(!lm) return new Array(42).fill(0);
-    return lm.flatMap(p=>[(p.x-anchor[0])/scale,(p.y-anchor[1])/scale]);
+    return lm.flatMap(p => [(p.x - anchor[0]) / scale, (p.y - anchor[1]) / scale]);
   };
 
-  // 포즈 상체 특징 (9점×2 = 18)
+  // 포즈 상체 특징 (9점 × 2 = 18)
   const poseFeat = poseLm
-    ? POSE_IDX.flatMap(i=>[(poseLm[i].x-anchor[0])/scale,(poseLm[i].y-anchor[1])/scale])
+    ? POSE_IDX.flatMap(i => [(poseLm[i].x - anchor[0]) / scale, (poseLm[i].y - anchor[1]) / scale])
     : new Array(18).fill(0);
 
-  // 얼굴 핵심 특징 (5점×2 = 10)
+  // 얼굴 핵심 특징 (5점 × 2 = 10)
   const faceFeat = faceLm
-    ? FACE_IDX.flatMap(i=>[(faceLm[i].x-anchor[0])/scale,(faceLm[i].y-anchor[1])/scale])
+    ? FACE_IDX.flatMap(i => [(faceLm[i].x - anchor[0]) / scale, (faceLm[i].y - anchor[1]) / scale])
     : new Array(10).fill(0);
 
   return [...handFeat(leftLm), ...handFeat(rightLm), ...poseFeat, ...faceFeat]; // (112,)
 }
 
 async function runInference(){
-  if(!session||seqBuf.length<4){liveEl.textContent='동작이 너무 짧습니다';return;}
-  const T=seqBuf.length;
-  const sampled=Array.from({length:seqLen},(_,i)=>seqBuf[Math.round(i*(T-1)/(seqLen-1))]);
-  const flat=new Float32Array(sampled.flat());
-  const tensor=new ort.Tensor('float32',flat,[1,seqLen,INPUT_SIZE]);
-  const out=await session.run({input:tensor});
-  const logits=out.output.data;
-  const expV=Array.from(logits).map(v=>Math.exp(v));
-  const sumE=expV.reduce((a,b)=>a+b,0);
-  const prob=expV.map(v=>v/sumE);
-  const best=prob.indexOf(Math.max(...prob));
-  const conf=prob[best];
-  const label=labels[best]||'UNKNOWN';
-  if(conf>=CONF_THRESH&&label!=='UNKNOWN'){
-    liveEl.textContent=`${label}  (${(conf*100).toFixed(0)}%)`;
+  if(!session || seqBuf.length < 4){ liveEl.textContent = '동작이 너무 짧습니다'; return; }
+  const T = seqBuf.length;
+  const sampled = Array.from({length: seqLen}, (_, i) => seqBuf[Math.round(i * (T - 1) / (seqLen - 1))]);
+  const flat    = new Float32Array(sampled.flat());
+  const tensor  = new ort.Tensor('float32', flat, [1, seqLen, INPUT_SIZE]);
+  const out     = await session.run({input: tensor});
+  const logits  = out.output.data;
+  const expV    = Array.from(logits).map(v => Math.exp(v));
+  const sumE    = expV.reduce((a, b) => a + b, 0);
+  const prob    = expV.map(v => v / sumE);
+  const best    = prob.indexOf(Math.max(...prob));
+  const conf    = prob[best];
+  const label   = labels[best] || 'UNKNOWN';
+  if(conf >= CONF_THRESH && label !== 'UNKNOWN'){
+    liveEl.textContent = `${label}  (${(conf * 100).toFixed(0)}%)`;
     committed.push(label); render();
   } else {
-    liveEl.textContent='인식 실패 (신뢰도 낮음)';
+    liveEl.textContent = '인식 실패 (신뢰도 낮음)';
   }
-  seqBuf=[]; frameBar.style.width='0%';
+  seqBuf = []; frameBar.style.width = '0%';
 }
 
-// MediaPipe Holistic
-const holistic=new Holistic({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
-holistic.setOptions({modelComplexity:1,smoothLandmarks:true,
-  minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+// MediaPipe FaceMesh — 얼굴 랜드마크를 안정적으로 수집
+const faceMesh = new FaceMesh({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: false,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+faceMesh.onResults(results => {
+  latestFaceLm = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || null;
+});
 
-holistic.onResults(results=>{
-  canvas.width=video.videoWidth; canvas.height=video.videoHeight;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+// MediaPipe Holistic — 손 + 포즈
+const holistic = new Holistic({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
+holistic.setOptions({
+  modelComplexity: 1,
+  smoothLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
 
-  const hasHand=results.leftHandLandmarks||results.rightHandLandmarks;
+holistic.onResults(results => {
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const hasHand = results.leftHandLandmarks || results.rightHandLandmarks;
 
   if(hasHand){
-    if(handGoneTimer){clearTimeout(handGoneTimer);handGoneTimer=null;}
-    handVisible=true;
+    if(handGoneTimer){ clearTimeout(handGoneTimer); handGoneTimer = null; }
+    handVisible = true;
 
     if(results.leftHandLandmarks){
-      drawConnectors(ctx,results.leftHandLandmarks,HAND_CONNECTIONS,{color:'#38ef7d',lineWidth:2});
-      drawLandmarks(ctx,results.leftHandLandmarks,{color:'#fff',lineWidth:1,radius:3});
+      drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, {color:'#38ef7d', lineWidth:2});
+      drawLandmarks(ctx, results.leftHandLandmarks, {color:'#fff', lineWidth:1, radius:3});
     }
     if(results.rightHandLandmarks){
-      drawConnectors(ctx,results.rightHandLandmarks,HAND_CONNECTIONS,{color:'#38ef7d',lineWidth:2});
-      drawLandmarks(ctx,results.rightHandLandmarks,{color:'#fff',lineWidth:1,radius:3});
+      drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, {color:'#38ef7d', lineWidth:2});
+      drawLandmarks(ctx, results.rightHandLandmarks, {color:'#fff', lineWidth:1, radius:3});
     }
     if(results.poseLandmarks){
-      drawConnectors(ctx,results.poseLandmarks,POSE_CONNECTIONS,{color:'#44448888',lineWidth:1});
+      drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, {color:'#44448888', lineWidth:1});
     }
 
-    const feat=extractFeat(results);
+    const feat = extractFeat(results);
     if(feat){
       seqBuf.push(feat);
-      if(seqBuf.length>seqLen*3) seqBuf=seqBuf.slice(-seqLen*3);
+      if(seqBuf.length > seqLen * 3) seqBuf = seqBuf.slice(-seqLen * 3);
     }
-    frameBar.style.width=(Math.min(seqBuf.length,MAX_FRAMES)/MAX_FRAMES*100)+'%';
-    liveEl.textContent=`수집 중 (${seqBuf.length}프레임)`;
+    frameBar.style.width = (Math.min(seqBuf.length, MAX_FRAMES) / MAX_FRAMES * 100) + '%';
+    liveEl.textContent = `수집 중 (${seqBuf.length}프레임)`;
 
   } else {
-    if(handVisible&&!handGoneTimer){
-      handGoneTimer=setTimeout(()=>{
-        handVisible=false; handGoneTimer=null;
-        liveEl.textContent='손을 카메라에 보여주세요';
+    if(handVisible && !handGoneTimer){
+      handGoneTimer = setTimeout(() => {
+        handVisible = false; handGoneTimer = null;
+        liveEl.textContent = '손을 카메라에 보여주세요';
         runInference();
-      },HAND_GONE_MS);
+      }, HAND_GONE_MS);
     }
   }
 });
 
 function startCamera(res){
-  if(camera){ camera.stop(); camera=null; }
-  const [w,h]=RES[res]||[640,480];
-  camera=new Camera(video,{onFrame:async()=>{await holistic.send({image:video});},width:w,height:h});
+  if(camera){ camera.stop(); camera = null; }
+  const [w, h] = RES[res] || [640, 480];
+  camera = new Camera(video, {
+    onFrame: async () => {
+      await Promise.all([
+        holistic.send({image: video}),
+        faceMesh.send({image: video})
+      ]);
+    },
+    width: w, height: h
+  });
   camera.start();
-  statusEl.textContent=`카메라 ${w}x${h}`;
+  statusEl.textContent = `카메라 ${w}x${h}`;
 }
 
-function changeResolution(val){ curRes=val; startCamera(val); }
+function changeResolution(val){ curRes = val; startCamera(val); }
 
 async function init(){
-  const res=await fetch('models/labels.json');
-  const data=await res.json();
-  labels=data.seq; seqLen=data.seq_len||20;
+  const res  = await fetch('models/labels.json');
+  const data = await res.json();
+  labels = data.seq; seqLen = data.seq_len || 20;
 
-  labels.forEach(lb=>{
-    const span=document.createElement('span');
-    span.className='word-tag'; span.textContent=lb;
+  labels.forEach(lb => {
+    const span = document.createElement('span');
+    span.className = 'word-tag'; span.textContent = lb;
     wordList.appendChild(span);
   });
 
-  session=await ort.InferenceSession.create('models/seq.onnx');
-  loadingEl.style.display='none';
+  session = await ort.InferenceSession.create('models/seq.onnx');
+  loadingEl.style.display = 'none';
   startCamera(curRes);
 }
 
-init().catch(e=>{
-  statusEl.textContent='오류: '+e.message;
-  loadingEl.innerHTML=`<p style="color:#e74c3c">오류: ${e.message}</p>`;
+init().catch(e => {
+  statusEl.textContent = '오류: ' + e.message;
+  loadingEl.innerHTML = `<p style="color:#e74c3c">오류: ${e.message}</p>`;
 });
 </script>
-<script>if('serviceWorker'in navigator){navigator.serviceWorker.register('sw.js');}</script>
+<script>if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js'); }</script>
 </body>
 </html>
