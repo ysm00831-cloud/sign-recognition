@@ -3,7 +3,21 @@
 
 # -*- coding: utf-8 -*-
 
-import os, time, tempfile, threading
+import os, warnings, logging
+
+# ── 경고 억제 (가장 먼저 실행) ──────────────────────────────────────────────
+os.environ["TF_CPP_MIN_LOG_LEVEL"]      = "3"   # TensorFlow C++ 로그 끔
+os.environ["TF_ENABLE_ONEDNN_OPTS"]     = "0"   # oneDNN 알림 끔
+os.environ["ABSL_MIN_LOG_LEVEL"]        = "3"   # absl 로그 끔
+os.environ["GLOG_minloglevel"]          = "3"   # glog 끔
+os.environ["MEDIAPIPE_DISABLE_GPU"]     = "1"   # GPU 관련 경고 억제
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+warnings.filterwarnings("ignore")              # Python warnings 전체 끔
+
+logging.disable(logging.CRITICAL)             # Python logging 전체 끔
+
+import time, tempfile, threading
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,7 +25,13 @@ import cv2
 import mediapipe as mp
 from PIL import Image, ImageDraw, ImageFont
 import pyttsx3, winsound
-import mediapipe.framework.formats.landmark_pb2 as landmark_pb2
+try:
+    import mediapipe.framework.formats.landmark_pb2 as landmark_pb2
+except (ModuleNotFoundError, ImportError):
+    from typing import Any as _Any
+    class _LandmarkPb2Stub:
+        NormalizedLandmarkList = _Any
+    landmark_pb2 = _LandmarkPb2Stub()
 
 import torch
 import torch.nn as nn
@@ -194,6 +214,55 @@ def draw_korean_text_bottom_right(frame, text,
     draw.text((x,y), text, font=font, fill=(color[2], color[1], color[0]))
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
+def draw_bottom_left_panel(frame, label_text, sentence_text,
+                           font_size_label=72, font_size_sentence=26,
+                           margin=16, pad=12, alpha=0.70):
+    """왼쪽 하단에 어두운 반투명 배경 박스 + 흰 글씨로 라벨·문장 표시."""
+    h, w = frame.shape[:2]
+    try:
+        font_lbl = ImageFont.truetype(KOREAN_FONT, font_size_label)
+        font_sen = ImageFont.truetype(KOREAN_FONT, font_size_sentence)
+    except:
+        font_lbl = ImageFont.load_default()
+        font_sen = font_lbl
+
+    dummy = Image.new("RGB", (1, 1))
+    dd = ImageDraw.Draw(dummy)
+
+    lbl_bbox = dd.textbbox((0, 0), label_text, font=font_lbl) if label_text else (0,0,0,0)
+    sen_bbox = dd.textbbox((0, 0), sentence_text, font=font_sen) if sentence_text else (0,0,0,0)
+
+    lbl_w = lbl_bbox[2] - lbl_bbox[0]
+    lbl_h = lbl_bbox[3] - lbl_bbox[1]
+    sen_w = sen_bbox[2] - sen_bbox[0]
+    sen_h = sen_bbox[3] - sen_bbox[1]
+
+    box_w = max(lbl_w, sen_w, 100) + pad * 2
+    box_h = (lbl_h if label_text else 0) + (sen_h + pad if sentence_text else 0) + pad * 2
+    if box_h <= pad * 2:
+        return frame
+
+    x1 = margin
+    y2 = h - margin
+    y1 = y2 - box_h
+    x2 = x1 + box_w
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (20, 20, 20), -1)
+    frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+    pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
+
+    y = y1 + pad
+    if label_text:
+        draw.text((x1 + pad, y), label_text, font=font_lbl, fill=(255, 255, 255))
+        y += lbl_h + pad
+    if sentence_text:
+        draw.text((x1 + pad, y), sentence_text, font=font_sen, fill=(220, 220, 220))
+
+    return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
 def draw_panel(frame, lines,
                font_size=16,
                color=(180,255,180),
@@ -318,7 +387,7 @@ def extract_jamo_keypoints(landmarks)->np.ndarray:
     return pts.flatten()  # (12,)
 
 def extract_seq_keypoints(results,
-                          hand_landmarks_list: List[landmark_pb2.NormalizedLandmarkList]
+                          hand_landmarks_list: List
                           )->Optional[np.ndarray]:
     """양손 동작용: 21점×2 손 → 84차원"""
     if not hand_landmarks_list:
@@ -466,25 +535,76 @@ JUNG_MAP = {c:i for i,c in enumerate(JUNG)}
 JONG_MAP = {c:i for i,c in enumerate(JONG)}
 
 def compose_syllables(jamo_stream: List[str]) -> str:
-    out = []
-    i = 0
-    while i < len(jamo_stream):
-        ch = jamo_stream[i]
-        if ch in CHO_MAP and i+1 < len(jamo_stream) and jamo_stream[i+1] in JUNG_MAP:
-            cho = CHO_MAP[ch]
-            jung = JUNG_MAP[jamo_stream[i+1]]
-            i += 2
-            jong = 0
-            if i < len(jamo_stream) and jamo_stream[i] in JONG_MAP:
-                jong = JONG_MAP[jamo_stream[i]]
-                i += 1
-            out.append(chr(0xAC00 + (cho*21 + jung)*28 + jong))
+    """
+    자모 스트림을 한국어 IME 방식으로 실시간 조합.
+      ["ㄱ","ㅏ","ㄴ","ㅏ"] → "가나"
+      ["ㄱ","ㅏ","ㄴ"]     → "간"
+      ["ㄱ","ㅏ"]          → "가"
+      ["ㄱ"]               → "ㄱ"
+    """
+    result: List[str] = []
+    cho_i:  Optional[int] = None   # CHO 인덱스
+    jung_i: Optional[int] = None   # JUNG 인덱스
+    jong_i: Optional[int] = None   # JONG 인덱스 (1이상)
+
+    def _flush():
+        nonlocal cho_i, jung_i, jong_i
+        if cho_i is None:
+            pass
+        elif jung_i is None:
+            result.append(CHO[cho_i])
         else:
-            if ch not in CHO_MAP and ch not in JUNG_MAP and ch not in JONG_MAP:
-                i += 1
-                continue
-            out.append(ch); i += 1
-    return "".join(out)
+            result.append(chr(0xAC00 + (cho_i * 21 + jung_i) * 28 + (jong_i or 0)))
+        cho_i = jung_i = jong_i = None
+
+    for jamo in jamo_stream:
+        if jamo in JUNG_MAP:            # ── 모음 입력 ──
+            j = JUNG_MAP[jamo]
+            if cho_i is None:
+                # 초성 없이 모음 단독
+                result.append(jamo)
+            elif jung_i is None:
+                # 초성 + 모음 결합
+                jung_i = j
+            elif jong_i is None:
+                # (초성+중성) + 모음 → 현재 글자 commit 후 모음 단독
+                _flush()
+                result.append(jamo)
+            else:
+                # (초성+중성+종성) + 모음 → 종성을 다음 초성으로 분리
+                prev_jong_char = JONG[jong_i]
+                jong_i = None
+                _flush()                       # 종성 없이 commit
+                if prev_jong_char in CHO_MAP:
+                    cho_i  = CHO_MAP[prev_jong_char]
+                    jung_i = j
+                else:
+                    # 복합 종성(ㄳ 등) — 그대로 표시 후 모음 단독
+                    result.append(prev_jong_char)
+                    result.append(jamo)
+
+        elif jamo in CHO_MAP:           # ── 자음 입력 ──
+            c = CHO_MAP[jamo]
+            if cho_i is None:
+                cho_i = c
+            elif jung_i is None:
+                # 초성만 있는데 새 자음 → 이전 초성 단독 commit
+                _flush()
+                cho_i = c
+            elif jong_i is None:
+                # (초성+중성) + 자음 → 종성 후보
+                if jamo in JONG_MAP:
+                    jong_i = JONG_MAP[jamo]
+                else:
+                    _flush()
+                    cho_i = c
+            else:
+                # (초성+중성+종성) + 자음 → 현재 글자 commit, 새 초성
+                _flush()
+                cho_i = c
+
+    _flush()
+    return "".join(result)
 
 # =============================================================================
 # 편집 제스처
@@ -781,16 +901,16 @@ def main():
 
             # -------- 랜드마크 그리기 (항상 표시) --------
             if True:
-                # 얼굴 윤곽
-                if result.face_landmarks:
+                # 얼굴 윤곽 (자모 인식 모드에서는 미표시)
+                if result.face_landmarks and recog_mode_str() != "jamo":
                     mp_draw.draw_landmarks(
                         frame, result.face_landmarks,
                         mp_holistic.FACEMESH_CONTOURS,
                         landmark_drawing_spec=None,
                         connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style()
                     )
-                # 몸 (어깨~팔)
-                if result.pose_landmarks:
+                # 몸 (어깨~팔) — 자모 인식 모드에서는 미표시
+                if result.pose_landmarks and recog_mode_str() != "jamo":
                     mp_draw.draw_landmarks(
                         frame, result.pose_landmarks,
                         mp_holistic.POSE_CONNECTIONS,
@@ -955,11 +1075,6 @@ def main():
             composed = compose_syllables(jamo_buf)
             sentence = "".join(committed) + composed
 
-            main_frame = draw_korean_text(main_frame, "문장:", (16, 12),
-                                          font_size=22, color=(250,220,220))
-            main_frame = draw_korean_text(main_frame, sentence[-40:], (90, 10),
-                                          font_size=28, color=(255,255,255))
-
             if show_counts:
                 lines += counts_summary_lines(data_jamo, data_seq)
             # 도움말/상태는 별도 창에 표시 (줄 수에 맞게 높이 동적 계산)
@@ -973,7 +1088,7 @@ def main():
                                   margin=MARGIN, line_gap=LINE_GAP)
             cv2.imshow(HELP_TITLE, help_img)
 
-            # 인식 라벨 표시 (PiP 영역 피해서 왼쪽 하단)
+            # 인식 라벨 + 문장을 왼쪽 하단에 어두운 배경 + 흰 글씨로 표시
             if detected_for_display and detected_for_display != "UNKNOWN":
                 if (detected_for_display in CONSONANTS or
                     detected_for_display in VOWELS or
@@ -981,10 +1096,13 @@ def main():
                     show_name = detected_for_display
                 else:
                     show_name = READABLE.get(detected_for_display, detected_for_display)
-                main_frame = draw_korean_text_bottom_right(
-                    main_frame, show_name, font_size=80, color=(0,0,0),
-                    y_offset=RESULT_Y_OFFSET
-                )
+            else:
+                show_name = ""
+            main_frame = draw_bottom_left_panel(
+                main_frame,
+                label_text=show_name,
+                sentence_text="문장: " + sentence[-40:]
+            )
 
             # PiP 삽입 (우하단)
             pip_img = cv2.resize(pip_frame, (pip_w, pip_h))

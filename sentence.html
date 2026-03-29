@@ -43,6 +43,7 @@
          font-size:.9rem;cursor:pointer;font-family:inherit}
   .btn-clear{background:#e74c3c;color:#fff}
   .btn-delete{background:#e67e22;color:#fff}
+  .btn-flip{background:#8e44ad;color:#fff}
   #status{margin-top:.5rem;font-size:.75rem;color:#666}
   #loading{position:fixed;inset:0;background:#0f0f1a;display:flex;flex-direction:column;
     align-items:center;justify-content:center;gap:1rem;z-index:100}
@@ -85,10 +86,10 @@
 <div class="controls">
   <button class="btn-delete" onclick="deleteLast()">← 삭제</button>
   <button class="btn-clear"  onclick="clearAll()">전체 삭제</button>
+  <button class="btn-flip"   onclick="flipCamera()">📷 전환</button>
 </div>
 <div id="status">모델 로딩 중...</div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
@@ -105,9 +106,19 @@ const loadingEl = document.getElementById('loading');
 const frameBar  = document.getElementById('frame-bar');
 const wordList  = document.getElementById('word-list');
 
+// 모바일 감지
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 const RES = { '240':[320,240], '480':[640,480], '720':[1280,720] };
-let curRes = '480';
-let camera = null;
+let curRes = isMobile ? '240' : '480';
+let facingMode = 'user';
+let stream = null;
+let animFrameId = null;
+let running = false;
+
+document.addEventListener('DOMContentLoaded', () => {
+  if(isMobile){ const sel=document.getElementById('res-select'); if(sel) sel.value='240'; }
+});
 
 // 특징 인덱스 (inference.py 와 동일)
 const POSE_IDX = [0, 11, 12, 13, 14, 15, 16, 23, 24];
@@ -204,7 +215,7 @@ faceMesh.onResults(results => {
 // MediaPipe Holistic — 손 + 포즈
 const holistic = new Holistic({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
 holistic.setOptions({
-  modelComplexity: 1,
+  modelComplexity: isMobile ? 0 : 1,
   smoothLandmarks: true,
   minDetectionConfidence: 0.5,
   minTrackingConfidence: 0.5
@@ -252,23 +263,46 @@ holistic.onResults(results => {
   }
 });
 
-function startCamera(res){
-  if(camera){ camera.stop(); camera = null; }
+// camera_utils 없이 직접 getUserMedia 사용 (iOS Safari 호환)
+async function startCamera(res){
+  running = false;
+  if(animFrameId){ cancelAnimationFrame(animFrameId); animFrameId = null; }
+  if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+
   const [w, h] = RES[res] || [640, 480];
-  camera = new Camera(video, {
-    onFrame: async () => {
-      await Promise.all([
-        holistic.send({image: video}),
-        faceMesh.send({image: video})
-      ]);
-    },
-    width: w, height: h
-  });
-  camera.start();
-  statusEl.textContent = `카메라 ${w}x${h}`;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width:{ideal:w}, height:{ideal:h}, facingMode:facingMode },
+      audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(resolve => { video.onloadedmetadata = resolve; });
+    await video.play();
+    running = true;
+
+    async function loop(){
+      if(!running) return;
+      if(video.readyState >= 2 && video.videoWidth > 0){
+        await Promise.all([
+          holistic.send({image: video}),
+          faceMesh.send({image: video})
+        ]);
+      }
+      animFrameId = requestAnimationFrame(loop);
+    }
+    loop();
+    statusEl.textContent = `카메라 ${w}x${h}${isMobile?' (모바일)':''}`;
+  } catch(e){
+    statusEl.textContent = '카메라 오류: ' + e.message;
+  }
 }
 
 function changeResolution(val){ curRes = val; startCamera(val); }
+
+function flipCamera(){
+  facingMode = facingMode === 'user' ? 'environment' : 'user';
+  startCamera(curRes);
+}
 
 async function init(){
   const res  = await fetch('models/labels.json');

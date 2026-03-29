@@ -35,6 +35,7 @@
   .btn-clear{background:#e74c3c;color:#fff}
   .btn-space{background:#3498db;color:#fff}
   .btn-delete{background:#e67e22;color:#fff}
+  .btn-flip{background:#8e44ad;color:#fff}
   #status{margin-top:.5rem;font-size:.75rem;color:#666}
   #loading{position:fixed;inset:0;background:#0f0f1a;display:flex;flex-direction:column;
     align-items:center;justify-content:center;gap:1rem;z-index:100}
@@ -72,10 +73,10 @@
   <button class="btn-space"  onclick="addSpace()">띄어쓰기</button>
   <button class="btn-delete" onclick="deleteLast()">← 삭제</button>
   <button class="btn-clear"  onclick="clearAll()">전체 삭제</button>
+  <button class="btn-flip"   onclick="flipCamera()">📷 전환</button>
 </div>
 <div id="status">모델 로딩 중...</div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
@@ -88,10 +89,21 @@ const outputEl = document.getElementById('output');
 const statusEl = document.getElementById('status');
 const loadingEl= document.getElementById('loading');
 
+// 모바일 감지
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 // 해상도 프리셋
 const RES = { '240':[320,240], '480':[640,480], '720':[1280,720] };
-let curRes = '480';
-let camera = null;
+let curRes = isMobile ? '240' : '480';
+let facingMode = 'user';
+let stream = null;
+let animFrameId = null;
+let running = false;
+
+// 모바일이면 기본 선택 옵션 변경
+document.addEventListener('DOMContentLoaded', () => {
+  if(isMobile){ const sel=document.getElementById('res-select'); if(sel) sel.value='240'; }
+});
 
 // 자모 조합
 const CHO  = Array.from("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ");
@@ -127,9 +139,14 @@ function addSpace(){ committed.push(compose(jamoBuf));jamoBuf=[];committed.push(
 function deleteLast(){ if(jamoBuf.length>0)jamoBuf.pop();else if(committed.length>0)committed.pop();render(); }
 function clearAll(){ jamoBuf=[];committed=[];render(); }
 
-// MediaPipe
+// MediaPipe Hands
 const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+hands.setOptions({
+  maxNumHands:1,
+  modelComplexity: isMobile ? 0 : 1,
+  minDetectionConfidence:0.5,
+  minTrackingConfidence:0.5
+});
 
 hands.onResults(async results=>{
   canvas.width=video.videoWidth; canvas.height=video.videoHeight;
@@ -179,17 +196,42 @@ async function predict(raw_lm){
   return {label:labels[best]||'UNKNOWN',conf:prob[best]};
 }
 
-function startCamera(res){
-  if(camera){ camera.stop(); camera=null; }
+// camera_utils 없이 직접 getUserMedia 사용 (iOS Safari 호환)
+async function startCamera(res){
+  running = false;
+  if(animFrameId){ cancelAnimationFrame(animFrameId); animFrameId=null; }
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+
   const [w,h]=RES[res]||[640,480];
-  camera=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},width:w,height:h});
-  camera.start();
-  statusEl.textContent=`카메라 ${w}x${h}`;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:{ideal:w}, height:{ideal:h}, facingMode:facingMode },
+      audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(resolve => { video.onloadedmetadata = resolve; });
+    await video.play();
+    running = true;
+
+    async function loop(){
+      if(!running) return;
+      if(video.readyState >= 2 && video.videoWidth > 0){
+        await hands.send({image: video});
+      }
+      animFrameId = requestAnimationFrame(loop);
+    }
+    loop();
+    statusEl.textContent=`카메라 ${w}x${h}${isMobile?' (모바일)':''}`;
+  } catch(e){
+    statusEl.textContent='카메라 오류: '+e.message;
+  }
 }
 
-function changeResolution(val){
-  curRes=val;
-  startCamera(val);
+function changeResolution(val){ curRes=val; startCamera(val); }
+
+function flipCamera(){
+  facingMode = facingMode==='user' ? 'environment' : 'user';
+  startCamera(curRes);
 }
 
 async function init(){
