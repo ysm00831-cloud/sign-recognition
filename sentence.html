@@ -90,10 +90,10 @@
 </div>
 <div id="status">모델 로딩 중...</div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/holistic.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/ort.min.js"></script>
 
 <script>
 const video     = document.getElementById('video');
@@ -200,8 +200,11 @@ async function runInference(){
   seqBuf = []; frameBar.style.width = '0%';
 }
 
-// MediaPipe FaceMesh — 얼굴 랜드마크를 안정적으로 수집
-const faceMesh = new FaceMesh({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+// ONNX 단일 스레드 모드 (SharedArrayBuffer 없는 환경 대응)
+ort.env.wasm.numThreads = 1;
+
+// MediaPipe FaceMesh — 버전 고정
+const faceMesh = new FaceMesh({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`});
 faceMesh.setOptions({
   maxNumFaces: 1,
   refineLandmarks: false,
@@ -212,8 +215,8 @@ faceMesh.onResults(results => {
   latestFaceLm = (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) || null;
 });
 
-// MediaPipe Holistic — 손 + 포즈
-const holistic = new Holistic({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${f}`});
+// MediaPipe Holistic — 버전 고정
+const holistic = new Holistic({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/${f}`});
 holistic.setOptions({
   modelComplexity: isMobile ? 0 : 1,
   smoothLandmarks: true,
@@ -264,8 +267,12 @@ holistic.onResults(results => {
 });
 
 // camera_utils 없이 직접 getUserMedia 사용 (iOS Safari 호환)
+let processing = false;
+const FRAME_MS = isMobile ? 150 : 33; // 모바일 ~7fps (Holistic 무거움), PC 30fps
+let lastFrameAt = 0;
+
 async function startCamera(res){
-  running = false;
+  running = false; processing = false;
   if(animFrameId){ cancelAnimationFrame(animFrameId); animFrameId = null; }
   if(stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
 
@@ -280,20 +287,27 @@ async function startCamera(res){
     await video.play();
     running = true;
 
-    async function loop(){
+    function loop(){
       if(!running) return;
-      if(video.readyState >= 2 && video.videoWidth > 0){
-        await Promise.all([
-          holistic.send({image: video}),
-          faceMesh.send({image: video})
-        ]);
-      }
       animFrameId = requestAnimationFrame(loop);
+      const now = Date.now();
+      if(processing || now - lastFrameAt < FRAME_MS) return;
+      if(video.readyState < 2 || video.videoWidth === 0) return;
+      lastFrameAt = now;
+      processing = true;
+      // 모바일은 순차 실행(메모리 절약), PC는 병렬 실행
+      const sendPromise = isMobile
+        ? holistic.send({image: video}).then(() => faceMesh.send({image: video}))
+        : Promise.all([holistic.send({image: video}), faceMesh.send({image: video})]);
+      sendPromise.catch(e => {
+        statusEl.textContent = 'MediaPipe 오류: ' + e.message;
+      }).finally(() => { processing = false; });
     }
     loop();
     statusEl.textContent = `카메라 ${w}x${h}${isMobile?' (모바일)':''}`;
   } catch(e){
     statusEl.textContent = '카메라 오류: ' + e.message;
+    liveEl.textContent = '카메라 권한을 허용해주세요';
   }
 }
 

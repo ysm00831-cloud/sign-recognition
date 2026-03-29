@@ -77,9 +77,9 @@
 </div>
 <div id="status">모델 로딩 중...</div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/ort.min.js"></script>
 <script>
 const video    = document.getElementById('video');
 const canvas   = document.getElementById('canvas');
@@ -139,8 +139,11 @@ function addSpace(){ committed.push(compose(jamoBuf));jamoBuf=[];committed.push(
 function deleteLast(){ if(jamoBuf.length>0)jamoBuf.pop();else if(committed.length>0)committed.pop();render(); }
 function clearAll(){ jamoBuf=[];committed=[];render(); }
 
-// MediaPipe Hands
-const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+// ONNX 단일 스레드 모드 (SharedArrayBuffer 없는 환경 대응)
+ort.env.wasm.numThreads = 1;
+
+// MediaPipe Hands (버전 고정)
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${f}`});
 hands.setOptions({
   maxNumHands:1,
   modelComplexity: isMobile ? 0 : 1,
@@ -197,8 +200,12 @@ async function predict(raw_lm){
 }
 
 // camera_utils 없이 직접 getUserMedia 사용 (iOS Safari 호환)
+let processing = false;
+const FRAME_MS = isMobile ? 100 : 33; // 모바일 10fps, PC 30fps
+let lastFrameAt = 0;
+
 async function startCamera(res){
-  running = false;
+  running = false; processing = false;
   if(animFrameId){ cancelAnimationFrame(animFrameId); animFrameId=null; }
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
 
@@ -213,17 +220,23 @@ async function startCamera(res){
     await video.play();
     running = true;
 
-    async function loop(){
+    function loop(){
       if(!running) return;
-      if(video.readyState >= 2 && video.videoWidth > 0){
-        await hands.send({image: video});
-      }
       animFrameId = requestAnimationFrame(loop);
+      const now = Date.now();
+      if(processing || now - lastFrameAt < FRAME_MS) return;
+      if(video.readyState < 2 || video.videoWidth === 0) return;
+      lastFrameAt = now;
+      processing = true;
+      hands.send({image: video}).catch(e=>{
+        statusEl.textContent='MediaPipe 오류: '+e.message;
+      }).finally(()=>{ processing=false; });
     }
     loop();
     statusEl.textContent=`카메라 ${w}x${h}${isMobile?' (모바일)':''}`;
   } catch(e){
     statusEl.textContent='카메라 오류: '+e.message;
+    liveEl.textContent='카메라 권한을 허용해주세요';
   }
 }
 
